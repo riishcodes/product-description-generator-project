@@ -57,6 +57,7 @@ Existing tools generally optimise for fluency or speed. They rarely provide an i
 - Classify claims as `SUPPORTED`, `UNSUPPORTED`, or `NEEDS REVIEW`.
 - Provide a responsive interface that works on desktop and mobile.
 - Deploy the complete system with no exposed API keys in the browser.
+- **Support bring-your-own-key (BYOK)** so visitors can use their own Gemini API key without the operator's key being shared or visitor keys persisted server-side.
 
 ### 1.3 Scope
 
@@ -203,6 +204,14 @@ Displays five dimensions for both audiences:
 - Visible error reporting instead of console-only failures
 - Responsive navigation drawer on mobile
 
+### 4.6 Security & Key Management (BYOK)
+
+- **Bring-Your-Own-Key (BYOK)**: Visitors enter their own Gemini API key in the settings modal. The key is validated against the Gemini API (`/api/settings/key`), stored in the browser's `localStorage`, and attached to subsequent `/api/generate` and `/api/verify` requests via the `x-gemini-api-key` header.
+- **Zero server persistence**: Visitor keys are never written to disk, logged, or stored in any server-side database. Each request carries only the key from that browser's session.
+- **Operator fallback**: When no visitor key is present, the app uses the operator's server-side `GEMINI_API_KEY` secret (configured via `wrangler secret put`).
+- **No cross-user leakage**: One visitor's key cannot be accessed by another visitor. The operator's key cannot be overwritten via the API.
+- **Per-request validation**: The `/api/settings/key` endpoint validates a key against the live Gemini API without storing it, returning `400` for invalid keys and `200` with the model name for valid keys.
+
 ---
 
 ## 5. System Design
@@ -225,6 +234,33 @@ The API layer is written once and exposed through two runtimes:
 - `server/src/worker.ts` — Cloudflare Worker entrypoint for production
 
 Both use the same route logic, schemas, and services. The Worker handles JSON parsing, validation, error responses, and optional CORS for separately hosted clients.
+
+### 5.3 BYOK Key Flow
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant M as Modal
+    participant S as localStorage
+    participant A as API Layer
+    participant G as Gemini API
+
+    B->>M: Opens API Key modal
+    B->>M: Pastes key
+    M->>A: POST /api/settings/key { apiKey }
+    A->>G: Validate key (models?pageSize=1)
+    G-->>A: 200 OK / 401/403
+    A-->>M: { success: true, model }
+    M->>S: localStorage.setItem('pdp.gemini.apiKey', key)
+    M-->>B: Shows "Using your key"
+
+    B->>A: POST /api/generate (header: x-gemini-api-key)
+    A->>G: generateContent with visitor key
+    G-->>A: Response
+    A-->>B: Generated descriptions
+```
+
+The key never touches the server's persistent storage. The `GeminiService` and `VerifierService` accept an optional `apiKeyOverride` parameter per request, which takes precedence over the singleton's operator key.
 
 ### 5.3 Generation Pipeline
 
@@ -298,7 +334,9 @@ interface VerificationReport {
 | `GET` | `/api/health` | Runtime status and active model | All environments |
 | `POST` | `/api/generate` | Generate two audience descriptions | All environments |
 | `POST` | `/api/verify` | Verify claims against source features | All environments |
-| `POST` | `/api/settings/key` | Update the Gemini key | Local development only |
+| `POST` | `/api/settings/key` | Validate a visitor-supplied Gemini key (BYOK) | All environments |
+
+> **Bring-Your-Own-Key (BYOK)**: Visitors can provide their own Gemini API key via the UI. The key is stored only in the browser's `localStorage` and sent with each request in the `x-gemini-api-key` header. The server validates the key against the Gemini API but **never persists it**. The operator's server-side key is used only as a fallback when no visitor key is present.
 
 ### 6.1 Generate Request
 
@@ -393,7 +431,8 @@ Content-Type: application/json
 | Code | Meaning |
 |---|---|
 | `200` | Request completed |
-| `400` | Validation failure or malformed JSON |
+| `400` | Validation failure, malformed JSON, or invalid API key |
+| `401` | Invalid or rejected Gemini API key (BYOK) |
 | `403` | Key update attempted in the hosted deployment |
 | `404` | Unknown API route |
 | `500` | Generation or verification failure |
@@ -506,6 +545,18 @@ npm run worker:dev
 
 Create `.dev.vars` in the project root with `GEMINI_API_KEY=...` before starting. The Worker is available at `http://localhost:8787`.
 
+### 8.6 Testing BYOK Locally
+
+1. Start the local Worker: `npm run worker:dev`
+2. Open `http://localhost:8787`
+3. Click the API key badge in the header → "Configure your Gemini API key"
+4. Paste a valid Gemini key → "Verify & use"
+5. The badge changes to "Using your key (AIza...)"
+6. Generate descriptions — they will use your key via the `x-gemini-api-key` header
+7. To test invalid key handling, paste an invalid key and observe the `400` error
+
+The local Express server (`npm run server`) also supports BYOK via the same header.
+
 ---
 
 ## 9. Deployment
@@ -545,12 +596,20 @@ npm run deploy
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `GEMINI_API_KEY` | Yes | Gemini API authentication |
+| `GEMINI_API_KEY` | Yes | Operator's fallback Gemini API key |
 | `GEMINI_MODEL` | No | Primary model override |
 | `GEMINI_FALLBACK_MODEL` | No | Fallback model override |
 | `CLIENT_ORIGIN` | No | Additional CORS origins for split hosting |
 
 Secrets are stored with `wrangler secret put` and are never included in the client bundle or repository.
+
+### 9.4 BYOK in Production
+
+No additional configuration is required for BYOK. The feature works automatically:
+
+- The `x-gemini-api-key` header is allowed via CORS (configured in `worker.ts` and `server.ts`).
+- `/api/settings/key` validates visitor keys without persisting them.
+- The operator's `GEMINI_API_KEY` secret is used only when no visitor key is present.
 
 The full deployment guide, including custom domains and troubleshooting, is available in [CLOUDFLARE_DEPLOYMENT.md](./CLOUDFLARE_DEPLOYMENT.md).
 
@@ -617,7 +676,7 @@ Flagged items: `40-hour battery`, `Bluetooth 5.3`, and `active noise cancellatio
 - **No persistent storage.** History is kept in memory and is lost on page refresh.
 - **Rule coverage is finite.** Deterministic checks target common consumer-product specifications; unusual domains may rely more heavily on the semantic audit.
 - **Best-effort verification.** The system reduces hallucination risk but does not guarantee legal or regulatory accuracy.
-- **Single shared API key.** The hosted deployment has no user authentication or per-user quotas.
+- **No user authentication.** BYOK allows per-visitor keys, but there is no identity system, rate limiting per user, or quota enforcement.
 - **Synchronous requests.** Responses are returned after the full model call completes; there is no token streaming.
 - **English-oriented prompts and patterns.** Other languages may require prompt and rule adjustments.
 - **Free-tier CPU limits.** Gemini calls are network-bound, but heavy traffic may require a paid Workers plan.
