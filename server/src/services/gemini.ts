@@ -1,16 +1,7 @@
 import { GenerateInput, AIGeneratedContent, aiGeneratedContentSchema } from '../schemas/productSchema.js';
 import { generateJson } from './geminiClient.js';
+import { PRIMARY_MODEL, MODEL_CANDIDATES } from './models.js';
 import { isTestEnvironment, readEnv } from './runtime.js';
-
-/**
- * Model IDs are configurable so they can be updated without a code change.
- * The defaults match the README/UI and are real, currently supported Gemini
- * model identifiers. Override them with GEMINI_MODEL / GEMINI_FALLBACK_MODEL.
- */
-const PRIMARY_MODEL =
-  readEnv('GEMINI_MODEL')?.trim() || 'gemini-3.5-flash-lite';
-const FALLBACK_MODEL =
-  readEnv('GEMINI_FALLBACK_MODEL')?.trim() || 'gemini-3.8-flash';
 
 // Tests must never call the live Gemini API: they should be deterministic and
 // must not consume the developer's API quota.
@@ -59,11 +50,20 @@ export class GeminiService {
     return this.apiKey ? PRIMARY_MODEL : 'Deterministic Factual Engine (API key pending)';
   }
 
-  public async generateDescriptions(input: GenerateInput): Promise<AIGeneratedContent> {
-    if (this.apiKey) {
+  public async generateDescriptions(
+    input: GenerateInput,
+    apiKeyOverride?: string
+  ): Promise<AIGeneratedContent> {
+    const apiKey = apiKeyOverride?.trim() || this.apiKey;
+
+    if (apiKey) {
       try {
-        return await this.generateWithGemini(input);
+        return await this.generateWithGemini(input, apiKey);
       } catch (err: any) {
+        // A user-supplied key should fail loudly: silently switching to the
+        // deterministic generator would hide an invalid or expired key.
+        if (apiKeyOverride) throw err;
+
         console.warn('Gemini API call failed, using dynamic factual generator:', err.message);
         return this.generateFallback(input);
       }
@@ -72,8 +72,10 @@ export class GeminiService {
     return this.generateFallback(input);
   }
 
-  private async generateWithGemini(input: GenerateInput): Promise<AIGeneratedContent> {
-    if (!this.apiKey) throw new Error('Gemini API key is not configured');
+  private async generateWithGemini(
+    input: GenerateInput,
+    apiKey: string
+  ): Promise<AIGeneratedContent> {
 
     const targetLength = LENGTH_GUIDES[input.length] || LENGTH_GUIDES.short;
 
@@ -140,8 +142,8 @@ ${
 Respond ONLY with a valid JSON object matching the requested schema.`;
 
     const responseText = await generateJson({
-      apiKey: this.apiKey,
-      models: [PRIMARY_MODEL, FALLBACK_MODEL],
+      apiKey,
+      models: MODEL_CANDIDATES,
       prompt: `${systemPrompt}\n\n${userPrompt}`,
       temperature: 0.2, // Low temperature to minimize hallucinations
     });

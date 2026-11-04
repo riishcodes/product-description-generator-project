@@ -45,6 +45,7 @@ import { HistoryDrawer, HistoryItem } from '../components/HistoryDrawer';
 import { ApiKeyModal } from '../components/ApiKeyModal';
 import { EmptyState } from '../components/arc/EmptyState';
 import { saveApiKey } from '../services/api';
+import { clearUserApiKey, getUserApiKey, setUserApiKey } from '../services/userKey';
 
 export const Home: React.FC = () => {
   // Navigation & Modals
@@ -55,6 +56,9 @@ export const Home: React.FC = () => {
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [userApiKey, setUserApiKeyState] = useState<string | null>(() =>
+    getUserApiKey()
+  );
 
   // Health starts disconnected; the real status is fetched from the server.
   const [health, setHealth] = useState<HealthResponse>({
@@ -573,11 +577,23 @@ export const Home: React.FC = () => {
             <button
               type="button"
               onClick={() => setIsApiKeyModalOpen(true)}
-              title="Click to configure Gemini API Key"
+              title="Configure your Gemini API key"
               className="flex items-center gap-2 px-3 py-2 sm:py-1.5 rounded-full bg-[#EDFDF3] border border-[#B7F4CA] text-[11px] sm:text-xs font-medium text-[#16A34A] hover:bg-[#E2FBEB] transition-colors cursor-pointer whitespace-nowrap"
             >
-              <span className={`w-2 h-2 rounded-full shrink-0 ${health.aiConnected ? 'bg-[#16A34A] animate-pulse' : 'bg-amber-500'}`} />
-              <span>{health.aiConnected ? 'Gemini AI Connected' : 'Connect Gemini API Key'}</span>
+              <span
+                className={`w-2 h-2 rounded-full shrink-0 ${
+                  userApiKey || health.aiConnected
+                    ? 'bg-[#16A34A] animate-pulse'
+                    : 'bg-amber-500'
+                }`}
+              />
+              <span>
+                {userApiKey
+                  ? 'Using your Gemini key'
+                  : health.aiConnected
+                  ? 'Gemini AI Connected'
+                  : 'Connect Gemini API Key'}
+              </span>
             </button>
 
             {/* User Profile Avatar */}
@@ -1233,12 +1249,22 @@ export const Home: React.FC = () => {
       <ApiKeyModal
         isOpen={isApiKeyModalOpen}
         onClose={() => setIsApiKeyModalOpen(false)}
-        isConnected={health.aiConnected}
+        isServerConnected={health.aiConnected}
+        userApiKey={userApiKey}
         modelName={health.model}
         onSaveKey={async (key) => {
+          // The API verifies the key without persisting it. The browser stores
+          // it and attaches it to each generation/verification request.
           const res = await saveApiKey(key);
-          setHealth(res);
-          return res.aiConnected;
+          if (!res.aiConnected) return false;
+
+          setUserApiKey(key);
+          setUserApiKeyState(key);
+          return true;
+        }}
+        onRemoveKey={() => {
+          clearUserApiKey();
+          setUserApiKeyState(null);
         }}
       />
     </div>

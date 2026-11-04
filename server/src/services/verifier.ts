@@ -4,16 +4,8 @@ import {
   VerifiedClaim,
 } from '../schemas/productSchema.js';
 import { generateJson } from './geminiClient.js';
+import { MODEL_CANDIDATES } from './models.js';
 import { isTestEnvironment, readEnv } from './runtime.js';
-
-/**
- * Keep these in sync with the generation service. Override via environment
- * variables rather than editing source when Google retires a model.
- */
-const PRIMARY_MODEL =
-  readEnv('GEMINI_MODEL')?.trim() || 'gemini-3.5-flash-lite';
-const FALLBACK_MODEL =
-  readEnv('GEMINI_FALLBACK_MODEL')?.trim() || 'gemini-3.8-flash';
 
 const IS_TEST_ENV = isTestEnvironment();
 
@@ -100,16 +92,25 @@ export class VerifierService {
     return false;
   }
 
-  public async verify(input: VerifyInput): Promise<VerificationReport> {
+  public async verify(
+    input: VerifyInput,
+    apiKeyOverride?: string
+  ): Promise<VerificationReport> {
+    const apiKey = apiKeyOverride?.trim() || this.apiKey;
+
     // 1. Run deterministic spec checks
     const deterministicClaims: VerifiedClaim[] = this.runDeterministicChecks(input);
 
     // 2. Run semantic claim checking (via Gemini if key available, or heuristic sentence-level audit)
     let semanticClaims: VerifiedClaim[] = [];
-    if (this.apiKey) {
+    if (apiKey) {
       try {
-        semanticClaims = await this.runGeminiSemanticCheck(input);
+        semanticClaims = await this.runGeminiSemanticCheck(input, apiKey);
       } catch (err: any) {
+        // Surface failures from a user-supplied key instead of silently
+        // downgrading to the heuristic auditor.
+        if (apiKeyOverride) throw err;
+
         console.warn('Gemini semantic verification failed, using heuristic extraction:', err.message);
         semanticClaims = this.runHeuristicClaimCheck(input);
       }
@@ -212,8 +213,10 @@ export class VerifierService {
   /**
    * Semantic claim verification with Gemini
    */
-  private async runGeminiSemanticCheck(input: VerifyInput): Promise<VerifiedClaim[]> {
-    if (!this.apiKey) return [];
+  private async runGeminiSemanticCheck(
+    input: VerifyInput,
+    apiKey: string
+  ): Promise<VerifiedClaim[]> {
 
     const prompt = `You are a strict factual verification auditor.
 Your job is to extract individual factual claims from generated product descriptions and determine whether each claim is supported by the original product information.
@@ -252,8 +255,8 @@ JSON format:
 }`;
 
     const responseText = await generateJson({
-      apiKey: this.apiKey,
-      models: [PRIMARY_MODEL, FALLBACK_MODEL],
+      apiKey,
+      models: MODEL_CANDIDATES,
       prompt,
       temperature: 0.1,
     });

@@ -16,7 +16,8 @@ verifyRouter.post('/', async (req: Request, res: Response): Promise<void> => {
     }
 
     const input = parseResult.data;
-    const report = await verifierService.verify(input);
+    const userApiKey = req.header('x-gemini-api-key')?.trim() || undefined;
+    const report = await verifierService.verify(input, userApiKey);
 
     res.json(report);
   } catch (err: any) {

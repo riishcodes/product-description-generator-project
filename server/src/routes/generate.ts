@@ -16,7 +16,8 @@ generateRouter.post('/', async (req: Request, res: Response): Promise<void> => {
     }
 
     const input = parseResult.data;
-    const generated = await geminiService.generateDescriptions(input);
+    const userApiKey = req.header('x-gemini-api-key')?.trim() || undefined;
+    const generated = await geminiService.generateDescriptions(input, userApiKey);
 
     const wordCount1 = countWords(generated.description1Text);
     const wordCount2 = countWords(generated.description2Text);

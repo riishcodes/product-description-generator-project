@@ -5,6 +5,7 @@ import cors from 'cors';
 import { generateRouter } from './routes/generate.js';
 import { verifyRouter } from './routes/verify.js';
 import { geminiService } from './services/gemini.js';
+import { validateApiKey } from './services/geminiClient.js';
 import { verifierService } from './services/verifier.js';
 import fs from 'fs';
 import path from 'path';
@@ -27,7 +28,11 @@ const clientOrigins = (process.env.CLIENT_ORIGIN || '')
 app.use(
   cors(
     clientOrigins.length > 0
-      ? { origin: clientOrigins, methods: ['GET', 'POST', 'OPTIONS'] }
+      ? {
+          origin: clientOrigins,
+          methods: ['GET', 'POST', 'OPTIONS'],
+          allowedHeaders: ['Content-Type', 'x-gemini-api-key'],
+        }
       : undefined
   )
 );
@@ -44,20 +49,35 @@ app.get('/api/health', (_req: Request, res: Response) => {
 });
 
 // Update API key
-app.post('/api/settings/key', (req: Request, res: Response): void => {
+app.post('/api/settings/key', async (req: Request, res: Response): Promise<void> => {
   const { apiKey } = req.body;
   if (!apiKey || typeof apiKey !== 'string' || apiKey.trim() === '') {
     res.status(400).json({ error: 'Valid API key string is required' });
     return;
   }
+
   const cleanKey = apiKey.trim();
+  const valid = await validateApiKey(cleanKey);
+
+  if (!valid) {
+    res.status(400).json({
+      error:
+        'Gemini rejected this API key. Check that it is valid and enabled for the Gemini API.',
+    });
+    return;
+  }
+
   const success1 = geminiService.setApiKey(cleanKey);
   const success2 = verifierService.setApiKey(cleanKey);
 
-  // Write to server/.env so it persists
+  // Write to server/.env so it persists locally, without wiping other settings.
   try {
     const envPath = path.resolve(__dirname, '../.env');
-    fs.writeFileSync(envPath, `GEMINI_API_KEY=${cleanKey}\nPORT=5000\n`);
+    const existing = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf8') : '';
+    const next = /^GEMINI_API_KEY=.*$/m.test(existing)
+      ? existing.replace(/^GEMINI_API_KEY=.*$/m, `GEMINI_API_KEY=${cleanKey}`)
+      : `${existing}${existing.endsWith('\n') || existing === '' ? '' : '\n'}GEMINI_API_KEY=${cleanKey}\n`;
+    fs.writeFileSync(envPath, next);
   } catch (err) {
     console.warn('Could not write to .env:', err);
   }

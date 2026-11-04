@@ -7,6 +7,8 @@
  */
 import { generateInputSchema, verifyInputSchema } from './schemas/productSchema.js';
 import { geminiService, countWords } from './services/gemini.js';
+import { GeminiAuthError, validateApiKey } from './services/geminiClient.js';
+import { PRIMARY_MODEL } from './services/models.js';
 import { verifierService } from './services/verifier.js';
 
 interface Env {
@@ -35,7 +37,7 @@ function corsHeaders(request: Request, env: Env): Record<string, string> {
   return {
     'access-control-allow-origin': origin,
     'access-control-allow-methods': 'GET, POST, OPTIONS',
-    'access-control-allow-headers': 'content-type',
+    'access-control-allow-headers': 'content-type, x-gemini-api-key',
     vary: 'origin',
   };
 }
@@ -69,13 +71,16 @@ export default {
       return env.ASSETS.fetch(request);
     }
 
-    // Secrets are injected by Cloudflare, so bind them to the service
-    // singletons on each request. This also keeps local `wrangler dev` simple.
+    // The operator's key is identical for every request, so binding it to the
+    // singleton is safe. User-supplied keys are never stored on the singleton;
+    // they are passed as a per-request override instead.
     if (env.GEMINI_API_KEY) {
       geminiService.setApiKey(env.GEMINI_API_KEY);
       verifierService.setApiKey(env.GEMINI_API_KEY);
     }
 
+    const userApiKey =
+      request.headers.get('x-gemini-api-key')?.trim() || undefined;
     const cors = corsHeaders(request, env);
 
     if (request.method === 'OPTIONS') {
@@ -112,7 +117,10 @@ export default {
 
       try {
         const input = parsed.data;
-        const generated = await geminiService.generateDescriptions(input);
+        const generated = await geminiService.generateDescriptions(
+          input,
+          userApiKey
+        );
 
         return json(
           {
@@ -139,7 +147,7 @@ export default {
             error: 'Failed to generate descriptions',
             message: err instanceof Error ? err.message : 'Internal server error',
           },
-          500,
+          err instanceof GeminiAuthError ? 401 : 500,
           cors
         );
       }
@@ -161,7 +169,7 @@ export default {
       }
 
       try {
-        const report = await verifierService.verify(parsed.data);
+        const report = await verifierService.verify(parsed.data, userApiKey);
         return json(report, 200, cors);
       } catch (err) {
         console.error('Error in /api/verify:', err);
@@ -170,21 +178,45 @@ export default {
             error: 'Failed to verify descriptions',
             message: err instanceof Error ? err.message : 'Internal server error',
           },
-          500,
+          err instanceof GeminiAuthError ? 401 : 500,
           cors
         );
       }
     }
 
-    // The hosted app uses a server-side secret. Letting visitors replace it at
-    // runtime would let anyone overwrite the operator's key.
-    if (url.pathname === '/api/settings/key') {
+    // Validate a visitor-supplied key. The key is used only for this check and
+    // is never persisted server-side; the browser stores it and sends it back
+    // per request. This lets the hosted app support bring-your-own-key without
+    // letting anyone replace the operator's secret.
+    if (url.pathname === '/api/settings/key' && request.method === 'POST') {
+      const body = (await readBody(request)) as { apiKey?: unknown } | null;
+      const apiKey =
+        body && typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
+
+      if (!apiKey) {
+        return json({ error: 'A Gemini API key is required' }, 400, cors);
+      }
+
+      const valid = await validateApiKey(apiKey);
+
+      if (!valid) {
+        return json(
+          {
+            error:
+              'Gemini rejected this API key. Check that it is valid and enabled for the Gemini API.',
+          },
+          400,
+          cors
+        );
+      }
+
       return json(
         {
-          error:
-            'API key updates are disabled in the hosted deployment. Set the GEMINI_API_KEY secret with `wrangler secret put GEMINI_API_KEY`.',
+          success: true,
+          aiConnected: true,
+          model: PRIMARY_MODEL,
         },
-        403,
+        200,
         cors
       );
     }
