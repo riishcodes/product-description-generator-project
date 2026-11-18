@@ -28,9 +28,9 @@ export class GeminiService {
   constructor() {
     if (IS_TEST_ENV) return;
 
-    const apiKey = readEnv('GEMINI_API_KEY');
-    if (apiKey && apiKey.trim() !== '' && apiKey !== 'YOUR_GEMINI_API_KEY') {
-      this.apiKey = apiKey.trim();
+    const apiKey = readEnv('GEMINI_API_KEY')?.trim();
+    if (apiKey && apiKey !== '' && !apiKey.toLowerCase().includes('your_gemini_api_key')) {
+      this.apiKey = apiKey;
     }
   }
 
@@ -160,7 +160,7 @@ Respond ONLY with a valid JSON object matching the requested schema.`;
    */
   public generateFallback(input: GenerateInput): AIGeneratedContent {
     const rawLines = input.features
-      .split('\n')
+      .split(/\r?\n|\\n/)
       .map((f) => f.replace(/^[•\-\*]\s*/, '').trim())
       .filter((f) => f.length > 0);
 
